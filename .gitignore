@@ -79,6 +79,28 @@ config.ini
 archive.txt
 cookies.txt
 
+# Generated content directories
+merged_videos_en/
+merged_videos_final/
+openai_traditional_chinese/
+openai_with_chinese_subs/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+*.flv
+*.webm
+
+# Subtitle files
+*.vtt
+*.srt
+*.ass
+*.ssa
+*.sub
+
 # Temporary files
 *.tmp
 *.temp
