@@ -17,6 +17,9 @@ dependencies = [
   "ffmpeg-python>=0.2.0",
 ]
 
+[project.scripts]
+youtube-migrator = "src.main:main"
+
 [dependency-groups]
 dev = [
   "pytest>=7",

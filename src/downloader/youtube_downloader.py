@@ -57,10 +57,10 @@ class YouTubeDownloader:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                
+
                 if not info:
                     raise Exception("Failed to extract video information")
-                
+
                 total_bytes = info.get('filesize') or info.get('filesize_approx', 0)
                 if total_bytes:
                     self._current_pbar = tqdm(
@@ -69,15 +69,23 @@ class YouTubeDownloader:
                         unit_scale=True,
                         desc=f"Downloading {info.get('title', 'Unknown')[:30]}..."
                     )
-                
+
+                # Resolve the target filename ahead of time for manifesting.
+                prepared = None
+                try:
+                    prepared = ydl.prepare_filename(info)
+                except Exception:
+                    prepared = None
+
                 ydl.download([url])
-                
+
                 return {
                     'success': True,
                     'info': info,
-                    'output_path': self.output_path
+                    'output_path': self.output_path,
+                    'prepared_filename': prepared,
                 }
-                
+
         except Exception as e:
             self.logger.error(f"Download failed for {url}: {str(e)}")
             return {

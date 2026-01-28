@@ -3,6 +3,7 @@ import sys
 import logging
 from typing import List, Optional
 from pathlib import Path
+from datetime import datetime
 
 from .config.settings import ConfigManager
 from .downloader.youtube_downloader import YouTubeDownloader
@@ -10,6 +11,7 @@ from .metadata.extractor import MetadataExtractor
 from .organizer.file_organizer import FileOrganizer
 from .processor.video_processor import VideoProcessor
 from .utils.logger import setup_logging
+from .utils.manifest import write_manifest
 
 
 class YouTubeMigratorCLI:
@@ -155,28 +157,67 @@ class YouTubeMigratorCLI:
                 elif args.channel:
                     result = self.downloader.download_channel(url, args.limit)
                 else:
-                    result = self.downloader.download_video(url)
-                
+                    # Organize into the canonical folder structure.
+                    info = self.downloader.get_video_info(url)
+                    custom_opts = None
+                    base_dir = None
+                    if info:
+                        structure = self.file_organizer.create_video_structure(info)
+                        base_dir = structure['video']
+                        custom_opts = {
+                            'outtmpl': str(base_dir / '%(title)s_%(id)s.%(ext)s')
+                        }
+                    result = self.downloader.download_video(url, custom_opts=custom_opts)
+                    if base_dir:
+                        result['video_dir'] = str(base_dir)
+
                 if not args.no_metadata and result.get('success'):
                     metadata = self.metadata_extractor.extract_video_metadata(url)
                     if metadata:
                         self.metadata_extractor.save_metadata(
-                            metadata, 
-                            output_path + '/metadata'
+                            metadata,
+                            str(Path(output_path) / 'metadata'),
                         )
-                
+                        result['extracted_metadata'] = metadata
+
                 results.append(result)
                 
             except Exception as e:
                 self.logger.error(f"Failed to process {url}: {str(e)}")
                 results.append({'success': False, 'error': str(e), 'url': url})
         
+        # Write per-video manifests when possible (single-video downloads only).
+        for r in results:
+            try:
+                if isinstance(r, dict) and r.get('success') and r.get('video_dir'):
+                    video_dir = Path(r['video_dir'])
+                    manifest = {
+                        'generated_at': datetime.now().isoformat(),
+                        'url': r.get('info', {}).get('webpage_url') or r.get('url'),
+                        'video_id': r.get('info', {}).get('id'),
+                        'title': r.get('info', {}).get('title'),
+                        'uploader': r.get('info', {}).get('uploader'),
+                        'paths': {
+                            'video_dir': str(video_dir),
+                            'prepared_filename': r.get('prepared_filename'),
+                        },
+                    }
+                    write_manifest(video_dir / 'manifest.json', manifest)
+            except Exception:
+                pass
+
         self._print_download_results(results)
 
     def handle_metadata(self, args):
         output_path = args.output or './metadata'
         
         results = self.metadata_extractor.batch_extract_metadata(args.urls, output_path)
+
+        # Persist in requested format as a convenience (batch_extract defaults to json).
+        if args.format == 'csv':
+            for r in results:
+                if r.get('success') and r.get('metadata'):
+                    self.metadata_extractor.save_metadata(r['metadata'], output_path, fmt='csv')
         
         self._print_metadata_results(results)
 
