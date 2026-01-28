@@ -73,7 +73,7 @@ Thumbs.db
 # Project specific
 downloads/
 logs/
-metadata/
+/metadata/
 config.ini
 *.log
 archive.txt
