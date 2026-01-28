@@ -7,18 +7,20 @@ from datetime import datetime
 
 from .config.settings import ConfigManager
 from .downloader.youtube_downloader import YouTubeDownloader
+from .downloader.listing import list_entries
 from .metadata.extractor import MetadataExtractor
 from .organizer.file_organizer import FileOrganizer
 from .processor.video_processor import VideoProcessor
 from .utils.logger import setup_logging
 from .utils.manifest import write_manifest
+from .utils.state import find_existing_video_dir
 
 
 class YouTubeMigratorCLI:
     def __init__(self):
         self.config_manager = ConfigManager()
         self.setup_logging()
-        
+
         self.downloader = None
         self.metadata_extractor = MetadataExtractor()
         self.file_organizer = None
@@ -38,25 +40,25 @@ class YouTubeMigratorCLI:
             description='YouTube Content Migrator - Download and organize YouTube videos with metadata',
             prog='youtube-migrator'
         )
-        
+
         parser.add_argument('--version', action='version', version='1.0.0')
-        
+
         subparsers = parser.add_subparsers(dest='command', help='Available commands')
-        
+
         self._add_download_parser(subparsers)
         self._add_metadata_parser(subparsers)
         self._add_config_parser(subparsers)
         self._add_organize_parser(subparsers)
         self._add_report_parser(subparsers)
         self._add_merge_parser(subparsers)
-        
+
         return parser
 
     def _add_download_parser(self, subparsers):
         download_parser = subparsers.add_parser('download', help='Download YouTube videos')
         download_parser.add_argument('urls', nargs='+', help='YouTube URLs to download')
         download_parser.add_argument('-o', '--output', help='Output directory')
-        download_parser.add_argument('-q', '--quality', 
+        download_parser.add_argument('-q', '--quality',
                                    choices=['best', 'worst', '720p', '1080p', 'audio'],
                                    help='Video quality')
         download_parser.add_argument('--audio-only', action='store_true',
@@ -71,6 +73,10 @@ class YouTubeMigratorCLI:
                                    help='Treat URLs as channels')
         download_parser.add_argument('--limit', type=int,
                                    help='Limit number of videos to download')
+        download_parser.add_argument('--dry-run', action='store_true',
+                                   help='List what would be downloaded without downloading')
+        download_parser.add_argument('--force', action='store_true',
+                                   help='Redownload even if the video appears to be already downloaded')
 
     def _add_metadata_parser(self, subparsers):
         metadata_parser = subparsers.add_parser('metadata', help='Extract metadata only')
@@ -82,18 +88,18 @@ class YouTubeMigratorCLI:
     def _add_config_parser(self, subparsers):
         config_parser = subparsers.add_parser('config', help='Configuration management')
         config_subparsers = config_parser.add_subparsers(dest='config_action')
-        
+
         config_subparsers.add_parser('show', help='Show current configuration')
         config_subparsers.add_parser('reset', help='Reset to default configuration')
-        
+
         config_subparsers.add_parser('validate', help='Validate configuration')
-        
+
         export_parser = config_subparsers.add_parser('export', help='Export configuration')
         export_parser.add_argument('file', help='Export file path')
-        
+
         import_parser = config_subparsers.add_parser('import', help='Import configuration')
         import_parser.add_argument('file', help='Import file path')
-        
+
         set_parser = config_subparsers.add_parser('set', help='Set configuration value')
         set_parser.add_argument('section', help='Configuration section')
         set_parser.add_argument('key', help='Configuration key')
@@ -136,42 +142,86 @@ class YouTubeMigratorCLI:
 
     def handle_download(self, args):
         download_config = self.config_manager.get_download_config()
-        
+
         output_path = args.output or download_config['output_path']
         quality = args.quality or download_config['quality']
-        
+
         if args.audio_only:
             quality = 'audio'
-        
+
         self.downloader = YouTubeDownloader(output_path, quality)
         self.file_organizer = FileOrganizer(output_path)
-        
+
         results = []
-        
+
         for url in args.urls:
             self.logger.info(f"Processing URL: {url}")
-            
+
+            # For playlist/channel dry-run, list entries and continue.
+            if args.dry_run and (args.playlist or args.channel):
+                entries = list_entries(url, limit=args.limit)
+                results.append(
+                    {
+                        'success': True,
+                        'url': url,
+                        'dry_run': True,
+                        'entries': entries,
+                        'count': len(entries),
+                    }
+                )
+                continue
+
             try:
                 if args.playlist:
                     result = self.downloader.download_playlist(url)
                 elif args.channel:
                     result = self.downloader.download_channel(url, args.limit)
                 else:
-                    # Organize into the canonical folder structure.
+                    # Single video flow: organize into canonical folder, dedupe, and optionally dry-run.
                     info = self.downloader.get_video_info(url)
-                    custom_opts = None
-                    base_dir = None
-                    if info:
-                        structure = self.file_organizer.create_video_structure(info)
-                        base_dir = structure['video']
-                        custom_opts = {
-                            'outtmpl': str(base_dir / '%(title)s_%(id)s.%(ext)s')
-                        }
-                    result = self.downloader.download_video(url, custom_opts=custom_opts)
-                    if base_dir:
-                        result['video_dir'] = str(base_dir)
+                    if not info:
+                        raise Exception("Failed to extract video information")
 
-                if not args.no_metadata and result.get('success'):
+                    video_id = info.get('id')
+                    if video_id and not args.force:
+                        existing = find_existing_video_dir(output_path, video_id)
+                        if existing:
+                            results.append(
+                                {
+                                    'success': True,
+                                    'url': url,
+                                    'skipped': True,
+                                    'reason': 'already-downloaded',
+                                    'video_id': video_id,
+                                    'video_dir': str(existing),
+                                    'info': info,
+                                }
+                            )
+                            continue
+
+                    structure = self.file_organizer.create_video_structure(info)
+                    base_dir = structure['video']
+
+                    if args.dry_run:
+                        results.append(
+                            {
+                                'success': True,
+                                'url': url,
+                                'dry_run': True,
+                                'video_id': video_id,
+                                'video_dir': str(base_dir),
+                                'info': info,
+                            }
+                        )
+                        continue
+
+                    custom_opts = {
+                        'outtmpl': str(base_dir / '%(title)s_%(id)s.%(ext)s')
+                    }
+                    result = self.downloader.download_video(url, custom_opts=custom_opts)
+                    result['video_dir'] = str(base_dir)
+
+                if not args.no_metadata and isinstance(result, dict) and result.get('success'):
                     metadata = self.metadata_extractor.extract_video_metadata(url)
                     if metadata:
                         self.metadata_extractor.save_metadata(
@@ -181,22 +231,26 @@ class YouTubeMigratorCLI:
                         result['extracted_metadata'] = metadata
 
                 results.append(result)
-                
+
             except Exception as e:
                 self.logger.error(f"Failed to process {url}: {str(e)}")
                 results.append({'success': False, 'error': str(e), 'url': url})
-        
+
         # Write per-video manifests when possible (single-video downloads only).
         for r in results:
             try:
-                if isinstance(r, dict) and r.get('success') and r.get('video_dir'):
+                if isinstance(r, dict) and r.get('success') and r.get('video_dir') and r.get('info'):
                     video_dir = Path(r['video_dir'])
+                    if r.get('dry_run') or r.get('skipped'):
+                        # Still useful to have a manifest stub for planned/skipped entries.
+                        pass
                     manifest = {
                         'generated_at': datetime.now().isoformat(),
                         'url': r.get('info', {}).get('webpage_url') or r.get('url'),
-                        'video_id': r.get('info', {}).get('id'),
+                        'video_id': r.get('info', {}).get('id') or r.get('video_id'),
                         'title': r.get('info', {}).get('title'),
                         'uploader': r.get('info', {}).get('uploader'),
+                        'status': 'skipped' if r.get('skipped') else ('dry-run' if r.get('dry_run') else 'downloaded'),
                         'paths': {
                             'video_dir': str(video_dir),
                             'prepared_filename': r.get('prepared_filename'),
@@ -206,11 +260,23 @@ class YouTubeMigratorCLI:
             except Exception:
                 pass
 
+        # Write a session report for debugging/auditing.
+        try:
+            report = {
+                'generated_at': datetime.now().isoformat(),
+                'command': 'download',
+                'output_path': output_path,
+                'results': results,
+            }
+            write_manifest(Path(output_path) / 'report.json', report)
+        except Exception:
+            pass
+
         self._print_download_results(results)
 
     def handle_metadata(self, args):
         output_path = args.output or './metadata'
-        
+
         results = self.metadata_extractor.batch_extract_metadata(args.urls, output_path)
 
         # Persist in requested format as a convenience (batch_extract defaults to json).
@@ -218,7 +284,7 @@ class YouTubeMigratorCLI:
             for r in results:
                 if r.get('success') and r.get('metadata'):
                     self.metadata_extractor.save_metadata(r['metadata'], output_path, fmt='csv')
-        
+
         self._print_metadata_results(results)
 
     def handle_config(self, args):
@@ -248,7 +314,7 @@ class YouTubeMigratorCLI:
     def handle_organize(self, args):
         output_path = args.output or args.path
         self.file_organizer = FileOrganizer(output_path)
-        
+
         if args.cleanup:
             self.file_organizer.cleanup_empty_directories(args.path)
             print("Cleaned up empty directories")
@@ -256,7 +322,7 @@ class YouTubeMigratorCLI:
     def handle_report(self, args):
         self.file_organizer = FileOrganizer()
         report = self.file_organizer.generate_directory_report(args.path)
-        
+
         if args.format == 'json':
             if args.output:
                 import json
@@ -271,13 +337,13 @@ class YouTubeMigratorCLI:
 
     def handle_merge(self, args):
         input_path = Path(args.input)
-        
+
         if not input_path.exists():
             print(f"Error: Input path does not exist: {input_path}", file=sys.stderr)
             return
-        
+
         output_dir = args.output or str(input_path.parent / "merged_videos")
-        
+
         subtitle_style = {
             'fontsize': args.fontsize,
             'fontcolor': args.fontcolor,
@@ -286,7 +352,7 @@ class YouTubeMigratorCLI:
             'shadow': 1,
             'shadowcolor': 'black'
         }
-        
+
         if input_path.is_file():
             self._handle_single_video_merge(input_path, output_dir, args, subtitle_style)
         elif input_path.is_dir() and args.batch:
@@ -297,13 +363,13 @@ class YouTubeMigratorCLI:
 
     def _handle_single_video_merge(self, video_path, output_dir, args, subtitle_style):
         subtitle_file = self._find_subtitle_for_video(video_path, args.lang)
-        
+
         if not subtitle_file:
             print(f"Error: No {args.lang} subtitle found for {video_path.name}", file=sys.stderr)
             return
-        
+
         output_file = Path(output_dir) / f"{video_path.stem}_with_subtitles{video_path.suffix}"
-        
+
         if args.dry_run:
             print("Would merge:")
             print(f"  Video: {video_path}")
@@ -312,9 +378,9 @@ class YouTubeMigratorCLI:
             print(f"  Language: {args.lang}")
             print(f"  Quality: {args.quality}")
             return
-        
+
         print(f"Merging {video_path.name} with {args.lang} subtitles...")
-        
+
         result = self.video_processor.merge_video_with_subtitles(
             str(video_path),
             str(subtitle_file),
@@ -322,7 +388,7 @@ class YouTubeMigratorCLI:
             subtitle_style,
             args.quality
         )
-        
+
         if result.get('success'):
             file_size = result.get('file_size', 0) / (1024 * 1024)
             print(f"✓ Successfully created: {output_file} ({file_size:.1f} MB)")
@@ -338,9 +404,9 @@ class YouTubeMigratorCLI:
                 status = "✓" if subtitle_file else "✗ (no subtitle)"
                 print(f"  {status} {video_file.name}")
             return
-        
+
         print(f"Starting batch processing with {args.lang} subtitles...")
-        
+
         results = self.video_processor.batch_process_videos(
             str(input_dir),
             output_dir,
@@ -348,7 +414,7 @@ class YouTubeMigratorCLI:
             subtitle_style,
             args.quality
         )
-        
+
         self._print_merge_results(results)
 
     def _find_subtitle_for_video(self, video_path, lang):
@@ -357,16 +423,16 @@ class YouTubeMigratorCLI:
     def _print_merge_results(self, results):
         successful = sum(1 for r in results if r.get('success'))
         total = len(results)
-        
+
         print(f"\nMerge Results: {successful}/{total} successful")
-        
+
         for result in results:
             if result.get('success'):
                 size_mb = result.get('file_size', 0) / (1024 * 1024)
                 print(f"✓ {result.get('video_name')} ({result.get('subtitle_lang')}) - {size_mb:.1f} MB")
             else:
                 print(f"✗ {result.get('video_name', 'Unknown')} - {result.get('error', 'Unknown error')}")
-        
+
         if successful > 0:
             print("\nMerged videos saved to the output directory.")
 
@@ -379,7 +445,7 @@ class YouTubeMigratorCLI:
             'Advanced': self.config_manager.get_advanced_config(),
             'Video Processing': self.config_manager.get_video_processing_config(),
         }
-        
+
         for section_name, config in sections.items():
             print(f"\n[{section_name}]")
             for key, value in config.items():
@@ -388,9 +454,9 @@ class YouTubeMigratorCLI:
     def _print_download_results(self, results: List[dict]):
         successful = sum(1 for r in results if r.get('success'))
         total = len(results)
-        
+
         print(f"\nDownload Results: {successful}/{total} successful")
-        
+
         for result in results:
             if result.get('success'):
                 info = result.get('info', {})
@@ -401,9 +467,9 @@ class YouTubeMigratorCLI:
     def _print_metadata_results(self, results: List[dict]):
         successful = sum(1 for r in results if r.get('success'))
         total = len(results)
-        
+
         print(f"\nMetadata Extraction Results: {successful}/{total} successful")
-        
+
         for result in results:
             if result.get('success'):
                 print(f"✓ {result.get('url')} - Saved to {result.get('metadata_path')}")
@@ -415,12 +481,12 @@ class YouTubeMigratorCLI:
             print("Configuration Errors:")
             for error in issues['errors']:
                 print(f"  ✗ {error}")
-        
+
         if issues['warnings']:
             print("\nConfiguration Warnings:")
             for warning in issues['warnings']:
                 print(f"  ⚠ {warning}")
-        
+
         if not issues['errors'] and not issues['warnings']:
             print("Configuration is valid ✓")
 
@@ -429,7 +495,7 @@ class YouTubeMigratorCLI:
         print(f"Generated: {report['generated_at']}")
         print(f"Total Videos: {report['total_videos']}")
         print(f"Total Size: {report.get('total_size_human', 'Unknown')}")
-        
+
         print("\nChannels:")
         for channel in report['channels']:
             print(f"  📁 {channel['name']}")
@@ -439,11 +505,11 @@ class YouTubeMigratorCLI:
     def run(self, args: Optional[List[str]] = None):
         parser = self.create_parser()
         parsed_args = parser.parse_args(args)
-        
+
         if not parsed_args.command:
             parser.print_help()
             return
-        
+
         try:
             if parsed_args.command == 'download':
                 self.handle_download(parsed_args)
