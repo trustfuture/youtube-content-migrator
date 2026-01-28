@@ -5,16 +5,16 @@ from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
 
-from .config.settings import ConfigManager
-from .downloader.youtube_downloader import YouTubeDownloader
-from .downloader.listing import list_entries
-from .metadata.extractor import MetadataExtractor
-from .organizer.file_organizer import FileOrganizer
-from .processor.video_processor import VideoProcessor
-from .utils.logger import setup_logging
-from .utils.manifest import write_manifest
-from .utils.state import find_existing_video_dir
-from .utils.reporting import summarize_results
+from config.settings import ConfigManager
+from downloader.youtube_downloader import YouTubeDownloader
+from downloader.listing import list_entries
+from metadata.extractor import MetadataExtractor
+from organizer.file_organizer import FileOrganizer
+from processor.video_processor import VideoProcessor
+from utils.logger import setup_logging
+from utils.manifest import write_manifest
+from utils.state import find_existing_video_dir
+from utils.reporting import summarize_results
 
 
 class YouTubeMigratorCLI:
