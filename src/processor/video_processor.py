@@ -134,7 +134,7 @@ class SubtitleConverter:
             # Filter out very short durations (less than 0.1 seconds)
             return duration >= 0.1
             
-        except:
+        except Exception:
             return True  # If we can't parse, include it to be safe
 
 

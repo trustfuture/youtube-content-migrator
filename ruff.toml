@@ -1,0 +1,8 @@
+target-version = "py38"
+
+[lint]
+# Keep this minimal for P0: avoid blocking on formatting/line-length.
+select = ["E", "F"]
+ignore = ["E501"]
+
+# Keep CI strict on src/ only for now; examples/tests/scripts can be cleaned up later.
