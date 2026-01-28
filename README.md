@@ -202,6 +202,39 @@ downloads/
 │           └── playlist_manifest.json
 ```
 
+## Output artifacts (manifests & reports)
+
+This tool writes a few machine-readable JSON files to make migrations and auditing easier:
+
+### Per-video manifest (`manifest.json`)
+Created inside each video folder (e.g. `.../videos/<title>_<id>/manifest.json`).
+
+Contains (stable-ish) fields like:
+- `video_id`, `title`, `uploader`, `url`
+- `status`: `downloaded` / `skipped` / `dry-run`
+- `paths`: includes `video_dir` and (best-effort) `prepared_filename`
+
+### Run index (`index.json`)
+Created at the download output root (e.g. `./downloads/index.json`).
+
+It lists all items processed in the run:
+- `video_id`, `title`, `status`
+- `video_dir` and `manifest_path`
+
+### Run report (`report.json`)
+Created at the download output root (e.g. `./downloads/report.json`).
+
+It includes:
+- `summary` (counts, skip reasons, top errors)
+- the raw `results` array for debugging
+
+## P2 download helpers
+
+- `--dry-run`: list what would be downloaded without downloading.
+  - For `--playlist` / `--channel` it lists entries (honors `--limit`).
+  - For single videos it computes the target folder and writes a manifest stub.
+- `--force`: bypass dedupe (redownload even if the video was already downloaded).
+
 ## Examples
 
 ### Download a channel with custom settings:
