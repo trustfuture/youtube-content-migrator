@@ -14,6 +14,7 @@ from .processor.video_processor import VideoProcessor
 from .utils.logger import setup_logging
 from .utils.manifest import write_manifest
 from .utils.state import find_existing_video_dir
+from .utils.reporting import summarize_results
 
 
 class YouTubeMigratorCLI:
@@ -172,54 +173,74 @@ class YouTubeMigratorCLI:
                 continue
 
             try:
-                if args.playlist:
-                    result = self.downloader.download_playlist(url)
-                elif args.channel:
-                    result = self.downloader.download_channel(url, args.limit)
-                else:
-                    # Single video flow: organize into canonical folder, dedupe, and optionally dry-run.
-                    info = self.downloader.get_video_info(url)
-                    if not info:
-                        raise Exception("Failed to extract video information")
-
-                    video_id = info.get('id')
-                    if video_id and not args.force:
-                        existing = find_existing_video_dir(output_path, video_id)
-                        if existing:
-                            results.append(
-                                {
-                                    'success': True,
-                                    'url': url,
-                                    'skipped': True,
-                                    'reason': 'already-downloaded',
-                                    'video_id': video_id,
-                                    'video_dir': str(existing),
-                                    'info': info,
-                                }
-                            )
-                            continue
-
-                    structure = self.file_organizer.create_video_structure(info)
-                    base_dir = structure['video']
-
+                if args.playlist or args.channel:
+                    # Normalize playlist/channel to a list of video URLs, so we can reuse the single-video
+                    # pipeline (dedupe + manifests + reporting).
+                    entries = list_entries(url, limit=args.limit)
+                    results.append(
+                        {
+                            'success': True,
+                            'url': url,
+                            'kind': 'playlist' if args.playlist else 'channel',
+                            'dry_run': bool(args.dry_run),
+                            'count': len(entries),
+                            'entries': entries,
+                        }
+                    )
                     if args.dry_run:
+                        continue
+
+                    for e in entries:
+                        video_url = e.get('webpage_url') or e.get('url')
+                        if not video_url:
+                            results.append({'success': False, 'error': 'missing-entry-url', 'entry': e})
+                            continue
+                        self._process_single_video_url(video_url, args, output_path, results)
+                    continue
+
+                # Single video flow: organize into canonical folder, dedupe, and optionally dry-run.
+                info = self.downloader.get_video_info(url)
+                if not info:
+                    raise Exception("Failed to extract video information")
+
+                video_id = info.get('id')
+                if video_id and not args.force:
+                    existing = find_existing_video_dir(output_path, video_id)
+                    if existing:
                         results.append(
                             {
                                 'success': True,
                                 'url': url,
-                                'dry_run': True,
+                                'skipped': True,
+                                'reason': 'already-downloaded',
                                 'video_id': video_id,
-                                'video_dir': str(base_dir),
+                                'video_dir': str(existing),
                                 'info': info,
                             }
                         )
                         continue
 
-                    custom_opts = {
-                        'outtmpl': str(base_dir / '%(title)s_%(id)s.%(ext)s')
-                    }
-                    result = self.downloader.download_video(url, custom_opts=custom_opts)
-                    result['video_dir'] = str(base_dir)
+                structure = self.file_organizer.create_video_structure(info)
+                base_dir = structure['video']
+
+                if args.dry_run:
+                    results.append(
+                        {
+                            'success': True,
+                            'url': url,
+                            'dry_run': True,
+                            'video_id': video_id,
+                            'video_dir': str(base_dir),
+                            'info': info,
+                        }
+                    )
+                    continue
+
+                custom_opts = {
+                    'outtmpl': str(base_dir / '%(title)s_%(id)s.%(ext)s')
+                }
+                result = self.downloader.download_video(url, custom_opts=custom_opts)
+                result['video_dir'] = str(base_dir)
 
                 if not args.no_metadata and isinstance(result, dict) and result.get('success'):
                     metadata = self.metadata_extractor.extract_video_metadata(url)
@@ -260,12 +281,42 @@ class YouTubeMigratorCLI:
             except Exception:
                 pass
 
+        # Write an index for the whole run (useful for migrations).
+        try:
+            index_entries = []
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                video_dir = r.get('video_dir')
+                if not video_dir:
+                    continue
+                p = Path(video_dir) / 'manifest.json'
+                index_entries.append(
+                    {
+                        'video_id': (r.get('info') or {}).get('id') or r.get('video_id'),
+                        'title': (r.get('info') or {}).get('title'),
+                        'status': 'skipped' if r.get('skipped') else ('dry-run' if r.get('dry_run') else 'downloaded'),
+                        'video_dir': video_dir,
+                        'manifest_path': str(p),
+                        'url': (r.get('info') or {}).get('webpage_url') or r.get('url'),
+                    }
+                )
+            index = {
+                'generated_at': datetime.now().isoformat(),
+                'output_path': output_path,
+                'items': index_entries,
+            }
+            write_manifest(Path(output_path) / 'index.json', index)
+        except Exception:
+            pass
+
         # Write a session report for debugging/auditing.
         try:
             report = {
                 'generated_at': datetime.now().isoformat(),
                 'command': 'download',
                 'output_path': output_path,
+                'summary': summarize_results(results),
                 'results': results,
             }
             write_manifest(Path(output_path) / 'report.json', report)
@@ -273,6 +324,50 @@ class YouTubeMigratorCLI:
             pass
 
         self._print_download_results(results)
+
+    def _process_single_video_url(self, url: str, args, output_path: str, results: list):
+        """Shared single-video pipeline used by download, playlist, and channel flows."""
+        info = self.downloader.get_video_info(url)
+        if not info:
+            results.append({'success': False, 'error': 'failed-to-extract-video-info', 'url': url})
+            return
+
+        video_id = info.get('id')
+        if video_id and not args.force:
+            existing = find_existing_video_dir(output_path, video_id)
+            if existing:
+                results.append(
+                    {
+                        'success': True,
+                        'url': url,
+                        'skipped': True,
+                        'reason': 'already-downloaded',
+                        'video_id': video_id,
+                        'video_dir': str(existing),
+                        'info': info,
+                    }
+                )
+                return
+
+        structure = self.file_organizer.create_video_structure(info)
+        base_dir = structure['video']
+
+        custom_opts = {
+            'outtmpl': str(base_dir / '%(title)s_%(id)s.%(ext)s')
+        }
+        result = self.downloader.download_video(url, custom_opts=custom_opts)
+        result['video_dir'] = str(base_dir)
+
+        if not args.no_metadata and isinstance(result, dict) and result.get('success'):
+            metadata = self.metadata_extractor.extract_video_metadata(url)
+            if metadata:
+                self.metadata_extractor.save_metadata(
+                    metadata,
+                    str(Path(output_path) / 'metadata'),
+                )
+                result['extracted_metadata'] = metadata
+
+        results.append(result)
 
     def handle_metadata(self, args):
         output_path = args.output or './metadata'
