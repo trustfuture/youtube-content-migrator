@@ -1,0 +1,9 @@
+target-version = "py38"
+
+[lint]
+select = [
+  "E",
+  "F",
+]
+
+# Keep CI strict on src/ only for now; examples/tests/scripts can be cleaned up later.

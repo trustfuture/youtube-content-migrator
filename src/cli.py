@@ -84,7 +84,7 @@ class YouTubeMigratorCLI:
         config_subparsers.add_parser('show', help='Show current configuration')
         config_subparsers.add_parser('reset', help='Reset to default configuration')
         
-        validate_parser = config_subparsers.add_parser('validate', help='Validate configuration')
+        config_subparsers.add_parser('validate', help='Validate configuration')
         
         export_parser = config_subparsers.add_parser('export', help='Export configuration')
         export_parser.add_argument('file', help='Export file path')
@@ -264,7 +264,7 @@ class YouTubeMigratorCLI:
         output_file = Path(output_dir) / f"{video_path.stem}_with_subtitles{video_path.suffix}"
         
         if args.dry_run:
-            print(f"Would merge:")
+            print("Would merge:")
             print(f"  Video: {video_path}")
             print(f"  Subtitle: {subtitle_file}")
             print(f"  Output: {output_file}")
@@ -327,7 +327,7 @@ class YouTubeMigratorCLI:
                 print(f"✗ {result.get('video_name', 'Unknown')} - {result.get('error', 'Unknown error')}")
         
         if successful > 0:
-            print(f"\nMerged videos saved to the output directory.")
+            print("\nMerged videos saved to the output directory.")
 
     def _show_config(self):
         sections = {
